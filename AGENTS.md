@@ -1,14 +1,10 @@
 ## Development
 
-When starting the dev server, use background mode:
-
-```
-astro dev --background
-```
-
-Manage the background server with `astro dev stop`, `astro dev status`, and `astro dev logs`.
+Dont start the dev server, I (user) will be running astro dev server so I can see the changes in real time.
 
 ## Documentation
+
+Consult Civilization_Simulation_MMO_GDD.pdf for more information about the game direction.
 
 Full documentation: https://docs.astro.build
 
