@@ -1,7 +1,7 @@
 // Technology tree. Separate concept from infrastructure:
 // - technologies.ts: what the player can research, chain prerequisites,
 //   and which buildings each tech unlocks.
-// - infrastructure (Home.tsx): what the player owns.
+// - infrastructure (Home.tsx): buildings.
 // Research rule for now: one active research at a time (BASE_RESEARCH_SLOTS).
 // Parallel slots unlock as the empire advances (later eras / governments).
 
