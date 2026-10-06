@@ -4,7 +4,7 @@ Dont start the dev server, I (user) will be running astro dev server so I can se
 
 ## Documentation
 
-Consult Civilization_Simulation_MMO_GDD.pdf for more information about the game direction.
+Consult Civilization_Simulation_MMO_GDD.md for more information about the game direction.
 
 Full documentation: https://docs.astro.build
 
