@@ -164,7 +164,7 @@ The frontend should never contain core simulation logic.
 
 PostgreSQL is the authoritative source of persistent world state.
 
-Core entities include worlds (with world_started_at and tick_seconds), civilizations, regions, cities, population groups, businesses, industries, resources, resource deposits, markets, goods, infrastructure, institutions, technologies, knowledge, laws, political groups, political parties, governments, armies, navies, wars, treaties, trade routes, events, decisions, player orders/actions (with started_at, finishes_at, status), and notifications.
+Core entities include worlds, civilizations, regions, cities, population groups, businesses, industries, resources, resource deposits, markets, goods, infrastructure, institutions, technologies, knowledge, laws, political groups, political parties, governments, armies, navies, wars, treaties, trade routes, events, decisions, player orders/actions (with started_at, finishes_at, status), and notifications.
 
 ## 27. Player Decisions and Projects
 
@@ -225,7 +225,7 @@ Every order stores server-computed started_at and finishes_at in the database. T
 
 The 60s tick is UI refresh only. It does not advance the simulation on the server. Each tick the client polls the database for pending decisions, order completions, and other players' interactions.
 
-Ticks are synchronized across clients from the world start time. The worlds table stores world_started_at and tick_seconds (60). The client fetches it once on connect and computes next_tick = tick_seconds - ((now - world_started_at) % tick_seconds) locally, so a player joining at 14:23:30 sees 30s. This costs one small query per client per minute and is light for client and database.
+Ticks are synced to LOCAL wall-clock time: 1 tick = 1 minute, firing on every minute boundary. The client computes next_tick = 60 - (seconds into the current minute) locally with no server time involved, so a player logging in at 10:48:20 sees 40s until the next tick. All clients therefore tick at the same minute boundaries without any sync query.
 
 Order completion must be idempotent, transactional, and recoverable. The system must handle missed ticks, duplicate completion checks, server failure, and concurrent execution without corrupting world state.
 

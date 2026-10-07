@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ALLOCATION_CATEGORIES,
   createCivilization,
@@ -6,11 +6,13 @@ import {
   type Civilization,
 } from "../data/civilization";
 import {
+  BUILDING_PRODUCTION_OPTIONS,
   FOOD_CONSUMPTION_INTERVAL_TICKS,
   advanceTick,
   clampAllocation,
   formatTicks,
   infraLaborPerTick,
+  laborPerTick,
   researchPerTick,
   ticksToCompleteBuild,
   ticksToCompleteBuildFor,
@@ -25,9 +27,19 @@ import {
 import { TECHNOLOGIES } from "../data/technologies";
 import ResearchTree from "./ResearchTree";
 
+// Menu views are intentionally separate from ALLOCATION_CATEGORIES:
+// Resources (stockpile) and Production (building outputs) are views, but
+// only Production has a population slider — Resources has none.
 const MENU_VIEWS = [
   "Overview",
-  ...ALLOCATION_CATEGORIES,
+  "Resources",
+  "Production",
+  "Economy",
+  "Research",
+  "Infrastructure",
+  "Military",
+  "Politics",
+  "Intelligence",
 ] as const;
 
 type MenuView = (typeof MENU_VIEWS)[number];
@@ -35,7 +47,7 @@ type MenuView = (typeof MENU_VIEWS)[number];
 const MENU_SHORTCUTS: Record<string, string> = {
   Overview: "1",
   Resources: "2",
-  Industry: "3",
+  Production: "3",
   Economy: "4",
   Research: "5",
   Infrastructure: "6",
@@ -44,6 +56,22 @@ const MENU_SHORTCUTS: Record<string, string> = {
   Intelligence: "9",
 };
 
+/** Terminal-style progress box: a bordered bar filled to done/total. */
+function ProgressBox({ done, total }: { done: number; total: number }) {
+  const pct = total > 0 ? Math.max(0, Math.min(1, done / total)) : 0;
+  return (
+    <span
+      className="ml-2 inline-block h-3 w-28 border border-white/30 align-middle"
+      role="progressbar"
+      aria-valuenow={Math.floor(done)}
+      aria-valuemin={0}
+      aria-valuemax={total}
+    >
+      <span className="block h-full bg-green-400/70" style={{ width: `${pct * 100}%` }} />
+    </span>
+  );
+}
+
 export default function Home() {
   const [isLoggedIn, setIsLoggedIn] = useState(false)
   const [loginName, setLoginName] = useState("")
@@ -51,7 +79,16 @@ export default function Home() {
   const [tribeInput, setTribeInput] = useState("")
   const [civInput, setCivInput] = useState("")
   const [game, setGame] = useState<Civilization | null>(null)
-  const [tickTimeCounter, setTickTimeCounter] = useState(60)
+  // Tick clock synced to LOCAL wall-clock time: 1 tick = 1 minute, firing
+  // on every minute boundary. "Next Tick" = seconds left in the current
+  // minute, so logging in at 10:48:20 shows 40s. No server time involved.
+  function secondsToNextTick(nowMs: number = Date.now()): number {
+    const frac = (nowMs / 1000) % 60;
+    const left = 60 - frac;
+    // Exact boundary reads as a full 60s rather than 0s.
+    return left <= 0.5 ? 60 : Math.ceil(left);
+  }
+  const [tickTimeCounter, setTickTimeCounter] = useState(() => secondsToNextTick())
   // Transient slider edits; committed into game.overview.allocation via [Apply].
   const [draft, setDraft] = useState<number[]>([]);
   const [currentView, setCurrentView] = useState<MenuView>("Overview");
@@ -61,21 +98,41 @@ export default function Home() {
   const applied = game?.overview.allocation ?? []
   const popLimit = game ? populationLimit(game) : 0
 
+  // One clock drives everything, synced to the local minute boundary: the
+  // interval refreshes the "Next Tick" countdown several times a second and
+  // fires the simulation tick exactly when the minute rolls over — so the
+  // label and the research/construction ETAs can never drift apart.
+  const lastTickMinuteRef = useRef(Math.floor(Date.now() / 60000));
   useEffect(() => {
+    setTickTimeCounter(secondsToNextTick());
     const id = setInterval(() => {
-      setTickTimeCounter((prev) => (prev <= 1 ? 60 : prev - 1))
-    }, 1000)
-    return () => clearInterval(id)
-  }, [])
+      const now = Date.now();
+      const minute = Math.floor(now / 60000);
+      if (minute !== lastTickMinuteRef.current) {
+        lastTickMinuteRef.current = minute;
+        setGame((prev) => (prev ? advanceTick(prev) : prev));
+      }
+      setTickTimeCounter(secondsToNextTick(now));
+    }, 250);
+    return () => clearInterval(id);
+  }, []);
 
-  // Simulation tick every 60s real time (1 tick = 1 minute game time).
+  // Number keys 1-9 switch menu views (matches the [1]-[9] hints).
+  // Ignored while typing in inputs and when combined with modifiers.
   useEffect(() => {
-    if (!inGame) return
-    const id = setInterval(() => {
-      setGame((prev) => (prev ? advanceTick(prev) : prev))
-    }, 60000)
-    return () => clearInterval(id)
-  }, [inGame])
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return
+      const view = (Object.keys(MENU_SHORTCUTS) as MenuView[]).find(
+        (v) => MENU_SHORTCUTS[v] === e.key
+      )
+      if (!view) return
+      selectView(view)
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [game])
 
   // Keep slider draft within population when starvation/growth changes it.
   useEffect(() => {
@@ -147,6 +204,19 @@ export default function Home() {
     setGame({
       ...game,
       construction: { activeKey: key, progress: 0 },
+    })
+  }
+
+  function setProduction(key: string, resource: string | null) {
+    if (!game) return
+    if (!(key in BUILDING_PRODUCTION_OPTIONS)) return
+    if (resource !== null && !BUILDING_PRODUCTION_OPTIONS[key].some((o) => o.resource === resource)) return
+    setGame({
+      ...game,
+      production: {
+        ...game.production,
+        assignments: { ...game.production.assignments, [key]: resource },
+      },
     })
   }
 
@@ -355,6 +425,9 @@ export default function Home() {
                   <h3 className="text-green-400 font-semibold">&gt; RESEARCH</h3>
                   {game && (
                     <>
+                      {(game.overview.allocation[ALLOCATION_CATEGORIES.indexOf("Research")] ?? 0) === 0 && (
+                        <p className="px-1 text-red-400 font-semibold">Assign population into research.</p>
+                      )}
                       <p className="px-1">
                         Researchers: <span className="text-amber-200 font-semibold">{game.overview.allocation[ALLOCATION_CATEGORIES.indexOf("Research")] ?? 0}</span>
                         {" | "}+<span className="text-cyan-200 font-semibold">{researchPerTick(game)}</span> Research pts
@@ -363,6 +436,7 @@ export default function Home() {
                         <p className="px-1">
                           Active: <span className="text-amber-200 font-semibold">{TECHNOLOGIES[game.research.activeId].name}</span>
                           {" "}{game.research.progress[game.research.activeId] ?? 0}/{TECHNOLOGIES[game.research.activeId].cost}
+                          <ProgressBox done={game.research.progress[game.research.activeId] ?? 0} total={TECHNOLOGIES[game.research.activeId].cost} />
                           {(() => {
                             const eta = ticksToCompleteResearch(game);
                             if (eta === null) return null;
@@ -385,6 +459,75 @@ export default function Home() {
                     </>
                   )}
                 </div>
+              ) : currentView === "Production" ? (
+                <div className="pt-2">
+                  <h3 className="text-green-400 font-semibold">&gt; PRODUCTION</h3>
+                  {game && (
+                    <p className="px-1">
+                      Workers: <span className="text-amber-200 font-semibold">{game.overview.allocation[ALLOCATION_CATEGORIES.indexOf("Production")] ?? 0}</span>
+                      {" | "}+<span className="text-cyan-200 font-semibold">{laborPerTick(game)}</span> Labor pts
+                    </p>
+                  )}
+                  <p className="px-1 text-white/60">Built resource buildings work only when you pick what they produce. Unset = inactive.</p>
+                  {game && (() => {
+                    const owned: { key: string; name: string; count: number }[] = [];
+                    for (const buildings of Object.values(game.infrastructure)) {
+                      for (const [key, b] of Object.entries(buildings)) {
+                        if (b.count > 0 && BUILDING_PRODUCTION_OPTIONS[key]) {
+                          owned.push({ key, name: b.name, count: b.count });
+                        }
+                      }
+                    }
+                    if (owned.length === 0) {
+                      return <p className="px-1 pt-1">No productive buildings yet. Research (e.g. Agriculture for Farm), then build in Infrastructure — they will show up here.</p>;
+                    }
+                    return owned.map(({ key, name, count }) => {
+                      const options = BUILDING_PRODUCTION_OPTIONS[key];
+                      const selected = game.production.assignments[key] ?? null;
+                      return (
+                        <div key={key} className="px-1 pt-1">
+                          <p>
+                            - {name} x<span className="text-amber-200 font-semibold">{count}</span>
+                            {" "}
+                            {selected ? (
+                              <span className="text-green-300">producing {selected}</span>
+                            ) : (
+                              <span className="text-red-400">inactive</span>
+                            )}
+                          </p>
+                          <p className="pl-2 text-white/60">
+                            Production:
+                            <button
+                              type="button"
+                              onClick={() => setProduction(key, null)}
+                              className={selected === null
+                                ? "ml-2 border border-amber-400/70 px-1 text-amber-200"
+                                : "ml-2 border border-white/20 px-1 text-white/60 hover:bg-white/5"}
+                            >
+                              [Inactive]
+                            </button>
+                            {options.map((o) => {
+                              const isActive = selected === o.resource;
+                              return (
+                                <button
+                                  key={o.resource}
+                                  type="button"
+                                  title={`${o.amount} ${o.resource} per ${formatTicks(o.everyTicks)} / labor / building`}
+                                  onClick={() => setProduction(key, o.resource)}
+                                  className={isActive
+                                    ? "ml-1 border border-amber-400/70 px-1 text-amber-200"
+                                    : "ml-1 border border-green-400/50 px-1 text-green-300 hover:bg-green-400/10"}
+                                >
+                                  [{o.resource} {o.amount}/{formatTicks(o.everyTicks)}]
+                                </button>
+                              );
+                            })}
+                          </p>
+                        </div>
+                      );
+                    });
+                  })()}
+                </div>
               ) : currentView === "Infrastructure" ? (
                 <div className="pt-2">
                   <h3 className="text-green-400 font-semibold">&gt; INFRASTRUCTURE</h3>
@@ -398,6 +541,10 @@ export default function Home() {
                     <p className="px-1">
                       Building: <span className="text-amber-200 font-semibold">{buildingName(game.construction.activeKey)}</span>
                       {" "}{game.construction.progress}/{buildingNextCost(game.construction.activeKey, ownedBuildingCount(game.infrastructure, game.construction.activeKey)) ?? "?"}
+                      {(() => {
+                        const total = buildingNextCost(game.construction.activeKey as string, ownedBuildingCount(game.infrastructure, game.construction.activeKey as string)) ?? 0;
+                        return <ProgressBox done={game.construction.progress} total={total} />;
+                      })()}
                       {(() => {
                         const eta = ticksToCompleteBuild(game);
                         if (eta === null) return null;

@@ -5,8 +5,9 @@
 // - Food: allocated citizens eat 1 every 480 ticks, free citizens eat 0.5.
 //   (meat=2, lentils=1). Starvation kills the unfed.
 // - Growth: +1 citizen every 60 ticks when food is in surplus, up to housing limit.
-// - Resources: 1 worker in Resources = 1 labor applied to EVERY owned
-//   resource building (e.g. 1 labor feeds 1 farm AND 1 mine at once).
+// - Resources: 1 worker in Production = 1 labor applied to EVERY ACTIVE owned
+//   resource building (e.g. 1 labor feeds 1 active farm AND 1 active mine at once).
+//   Buildings are inactive until the player picks an output in Production.
 // Later: tech boosts will modify points/labor/food-need.
 
 import {
@@ -78,6 +79,9 @@ export interface BuildingYield {
  * farm = 4 lentils/hour/labor, mine (coal) = 1 coal/4h/labor.
  * Meat comes from pasture/fishery/hunting; other workshops and
  * later industry produce nothing here until industry phase.
+ *
+ * Production only runs when the player picks an output for the building
+ * in the Production view. No selection = inactive (produces nothing).
  */
 export const BUILDING_YIELDS: Record<string, BuildingYield> = {
   farm: { resource: "lentils", amount: 4, everyTicks: 60 },
@@ -88,6 +92,36 @@ export const BUILDING_YIELDS: Record<string, BuildingYield> = {
   quarry: { resource: "stone", amount: 2, everyTicks: 60 },
   lumberCamp: { resource: "wood", amount: 2, everyTicks: 60 },
 };
+
+/**
+ * What each resource building can be set to produce in the Production view.
+ * Single-option buildings (farm -> lentils) still need to be activated;
+ * multi-option buildings (mine -> coal/stone) let the player choose.
+ * Buildings with no entry here have no known production yet and stay
+ * Infrastructure-only until the industry phase.
+ */
+export const BUILDING_PRODUCTION_OPTIONS: Record<string, BuildingYield[]> = {
+  farm: [{ resource: "lentils", amount: 4, everyTicks: 60 }],
+  pasture: [{ resource: "meat", amount: 2, everyTicks: 60 }],
+  fishery: [{ resource: "meat", amount: 3, everyTicks: 60 }],
+  huntingCamp: [{ resource: "meat", amount: 2, everyTicks: 60 }],
+  mine: [
+    { resource: "coal", amount: 1, everyTicks: 240 },
+    { resource: "stone", amount: 1, everyTicks: 60 },
+  ],
+  quarry: [{ resource: "stone", amount: 2, everyTicks: 60 }],
+  lumberCamp: [{ resource: "wood", amount: 2, everyTicks: 60 }],
+};
+
+/** Production options for a building key, or empty when it produces nothing. */
+export function productionOptionsFor(key: string): BuildingYield[] {
+  return BUILDING_PRODUCTION_OPTIONS[key] ?? [];
+}
+
+/** Selected resource for a building key, or null when inactive/unset. */
+export function productionAssignment(civ: Civilization, key: string): string | null {
+  return civ.production.assignments[key] ?? null;
+}
 
 function allocationIndex(name: string): number {
   return ALLOCATION_CATEGORIES.indexOf(name as (typeof ALLOCATION_CATEGORIES)[number]);
@@ -114,7 +148,7 @@ export function researchPerTick(civ: Civilization): number {
 
 /** Labor points per tick from the current allocation. */
 export function laborPerTick(civ: Civilization): number {
-  return civ.overview.allocation[allocationIndex("Resources")] ?? 0;
+  return civ.overview.allocation[allocationIndex("Production")] ?? 0;
 }
 
 /** Construction labor per tick from citizens allocated to Infrastructure. */
@@ -172,7 +206,7 @@ export function researchProgress(civ: Civilization, id: string): number {
 /** Advance the civilization by exactly one tick (pure, immutable). */
 export function advanceTick(prev: Civilization): Civilization {
   const tick = prev.tick + 1;
-  const labor = prev.overview.allocation[allocationIndex("Resources")] ?? 0;
+  const labor = prev.overview.allocation[allocationIndex("Production")] ?? 0;
   const researchers = prev.overview.allocation[allocationIndex("Research")] ?? 0;
 
   // --- Research (progress saved per tech, survives cancel/switch) ---
@@ -194,13 +228,20 @@ export function advanceTick(prev: Civilization): Civilization {
     }
   }
 
-  // --- Resource production: each labor point feeds every owned building ---
+  // --- Resource production: each labor point feeds every ACTIVE owned building ---
+  // A building only produces when the player picked an output for it in
+  // Production (production.assignments[key]). Unset/null = inactive.
   const stockpile: Record<string, number> = { ...prev.resources.stockpile };
   if (labor > 0) {
+    const assignments = prev.production.assignments ?? {};
     for (const group of Object.values(prev.infrastructure)) {
       for (const [key, building] of Object.entries(group)) {
         if (building.count <= 0) continue;
-        const yield_ = BUILDING_YIELDS[key];
+        const selected = assignments[key];
+        if (!selected) continue;
+        const options = BUILDING_PRODUCTION_OPTIONS[key];
+        if (!options) continue;
+        const yield_ = options.find((o) => o.resource === selected);
         if (!yield_) continue;
         const gain = (labor * building.count * yield_.amount) / yield_.everyTicks;
         stockpile[yield_.resource] = (stockpile[yield_.resource] ?? 0) + gain;

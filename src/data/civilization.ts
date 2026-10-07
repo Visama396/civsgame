@@ -6,8 +6,7 @@ import { START_INFRASTRUCTURE } from "./infrastructure";
 export type { Building, InfrastructureMap } from "./infrastructure";
 
 export const ALLOCATION_CATEGORIES = [
-  "Resources",
-  "Industry",
+  "Production",
   "Economy",
   "Research",
   "Infrastructure",
@@ -28,8 +27,14 @@ export interface ResourcesState {
   stockpile: Record<string, number>;
 }
 
-export interface IndustryState {
-  output: Record<string, number>;
+export interface ProductionState {
+  /**
+   * What each owned building type is set to produce in the Production view.
+   * Key = building key (e.g. "farm"), value = resource key (e.g. "lentils")
+   * or null/undefined = inactive (produces nothing).
+   * Buildings are inactive by default until the player picks a production.
+   */
+  assignments: Record<string, string | null>;
 }
 
 export interface EconomyState {
@@ -75,7 +80,7 @@ export interface Civilization {
   tick: number;
   overview: OverviewState;
   resources: ResourcesState;
-  industry: IndustryState;
+  production: ProductionState;
   economy: EconomyState;
   research: ResearchState;
   infrastructure: InfrastructureMap;
@@ -96,15 +101,15 @@ export function createCivilization(args: {
     leader: args.leader,
     tribe: args.tribe,
     name: args.name,
-    era: "Tribal",
+    era: "Ancient Age",
     tick: 0,
     overview: {
       population: START_POPULATION,
       // All free at the start: the player must move the sliders and decide.
       allocation: Array(ALLOCATION_CATEGORIES.length).fill(0),
     },
-    resources: { stockpile: { food: 0, meat: 100, lentils: 100, wood: 0, stone: 0, coal: 0 } },
-    industry: { output: {} },
+    resources: { stockpile: { food: 0, meat: 10, lentils: 0, wood: 0, stone: 0, coal: 0 } },
+    production: { assignments: {} },
     economy: { treasury: 0, taxRate: 10 },
     research: { activeId: null, completed: [], progress: {} },
     infrastructure: structuredClone(START_INFRASTRUCTURE),
