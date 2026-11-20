@@ -3,6 +3,7 @@
 // - technologies.ts: what the player can research and which buildings each tech unlocks.
 
 import { TECHNOLOGIES } from "./technologies";
+import { BUILDING_GROUP_TEXT, BUILDING_TEXT, type Language } from "../i18n";
 
 export interface Building {
   name: string;
@@ -123,10 +124,18 @@ export function buildingGroup(key: string): string | null {
   return null;
 }
 
-/** Display name for a building key. */
-export function buildingName(key: string): string {
+/** Localized display name for a building key. */
+export function buildingName(key: string, lang: Language = "en"): string {
   for (const buildings of Object.values(START_INFRASTRUCTURE)) {
-    if (key in buildings) return buildings[key].name;
+    if (key in buildings) {
+      if (lang === "en") return buildings[key].name;
+      return BUILDING_TEXT[lang][key] ?? buildings[key].name;
+    }
   }
   return key;
+}
+
+/** Localized heading for an infrastructure group. */
+export function buildingGroupName(group: string, lang: Language = "en"): string {
+  return BUILDING_GROUP_TEXT[lang][group] ?? group;
 }

@@ -2,8 +2,9 @@
 // - 1 tick = 1 minute (TICK_SECONDS).
 // - Research: 1 researcher = 1 point/tick into the active tech.
 // - Construction: 1 infrastructure worker = 1 labor/tick into the active building.
-// - Food: allocated citizens eat 1 every 480 ticks, free citizens eat 0.5.
-//   (meat=2, lentils=1). Starvation kills the unfed.
+// - Food: allocated citizens eat 1 per meal, free citizens eat 0.5. The meal
+//   interval is a Politics policy (1h-12h, default 8h). All food production
+//   adds to one "food" stockpile. Starvation kills the unfed.
 // - Growth: +1 citizen every 60 ticks when food is in surplus, up to housing limit.
 // - Resources: 1 worker in Production = 1 labor applied to EVERY ACTIVE owned
 //   resource building (e.g. 1 labor feeds 1 active farm AND 1 active mine at once).
@@ -12,6 +13,9 @@
 
 import {
   ALLOCATION_CATEGORIES,
+  DEFAULT_MEAL_INTERVAL_HOURS,
+  MAX_MEAL_INTERVAL_HOURS,
+  MIN_MEAL_INTERVAL_HOURS,
   populationLimit,
   type Civilization,
 } from "./civilization";
@@ -21,53 +25,43 @@ import {
   ownedBuildingCount,
 } from "./infrastructure";
 import { TECHNOLOGIES } from "./technologies";
+import { DEFAULT_LANGUAGE, formatDuration, type Language } from "../i18n";
 
 export const TICK_SECONDS = 60;
 
-/** 1 tick = 1 minute. Format a tick count as real time (min/h/d). */
-export function formatTicks(ticks: number): string {
-  const t = Math.max(0, Math.ceil(ticks));
-  if (t < 60) return `${t} min`;
-  const h = Math.floor(t / 60);
-  const m = t % 60;
-  if (h < 24) return m === 0 ? `${h}h` : `${h}h ${m}m`;
-  const d = Math.floor(h / 24);
-  const rh = h % 24;
-  return rh === 0 ? `${d}d` : `${d}d ${rh}h`;
+/** 1 tick = 1 minute. Format a tick count as localized real time (min/h/d). */
+export function formatTicks(ticks: number, lang: Language = DEFAULT_LANGUAGE): string {
+  return formatDuration(ticks, lang);
 }
 
 /** 1 researcher contributes this many points per tick. */
 export const RESEARCH_POINTS_PER_RESEARCHER_PER_TICK = 1;
 
-/** Citizens each eat FOOD_PER_CITIZEN every FOOD_CONSUMPTION_INTERVAL_TICKS.
+/** Citizens each eat FOOD_PER_CITIZEN per meal (meal timing is a policy).
  * Allocated citizens eat full rate, free citizens eat FREE_FOOD_RATE. */
-export const FOOD_CONSUMPTION_INTERVAL_TICKS = 480;
 export const FOOD_PER_CITIZEN = 1;
 export const FREE_FOOD_RATE = 0.5;
 
-/**
- * Food values: how many citizens 1 unit feeds.
- * meat = 2, lentils = 1 (food kept as 1 for legacy stockpiles).
- */
-export const FOOD_VALUES: Record<string, number> = {
-  lentils: 1,
-  food: 1,
-  meat: 2,
-};
+/** Public mood baseline and how much each hour of meal delay shifts it. */
+export const HAPPINESS_BASELINE = 50;
+export const HAPPINESS_PER_MEAL_HOUR = 6;
 
-/** Order foods are eaten when covering a meal (cheapest first, meat last). */
-const EAT_ORDER = ["lentils", "food", "meat"] as const;
-
-/** Total edible food value in a stockpile. */
-export function foodValue(stockpile: Record<string, number>): number {
-  return EAT_ORDER.reduce((sum, key) => sum + (stockpile[key] ?? 0) * (FOOD_VALUES[key] ?? 0), 0);
-}
+/** The single stockpile key all food production counts towards. */
+export const FOOD_RESOURCE = "food";
 
 /** +1 population every GROWTH_INTERVAL_TICKS when food is in surplus. */
 export const GROWTH_INTERVAL_TICKS = 60;
 
-export interface BuildingYield {
-  /** Key in resources.stockpile. */
+/**
+ * One production recipe a building can run. Every food recipe writes to the
+ * same stockpile key (FOOD_RESOURCE); the recipe only changes the rate.
+ */
+export interface ProductionOption {
+  /** Stable id stored in production.assignments[buildingKey] (e.g. "lentils"). */
+  id: string;
+  /** Recipe name shown in the Production view (e.g. "Lentils"). */
+  label: string;
+  /** Key in resources.stockpile that this option fills. */
   resource: string;
   /** Amount produced per `everyTicks` per labor point per building. */
   amount: number;
@@ -75,50 +69,42 @@ export interface BuildingYield {
 }
 
 /**
- * Base yields. Farm + mine are the spec examples:
- * farm = 4 lentils/hour/labor, mine (coal) = 1 coal/4h/labor.
- * Meat comes from pasture/fishery/hunting; other workshops and
- * later industry produce nothing here until industry phase.
- *
- * Production only runs when the player picks an output for the building
- * in the Production view. No selection = inactive (produces nothing).
- */
-export const BUILDING_YIELDS: Record<string, BuildingYield> = {
-  farm: { resource: "lentils", amount: 4, everyTicks: 60 },
-  pasture: { resource: "meat", amount: 2, everyTicks: 60 },
-  fishery: { resource: "meat", amount: 3, everyTicks: 60 },
-  huntingCamp: { resource: "meat", amount: 2, everyTicks: 60 },
-  mine: { resource: "coal", amount: 1, everyTicks: 240 },
-  quarry: { resource: "stone", amount: 2, everyTicks: 60 },
-  lumberCamp: { resource: "wood", amount: 2, everyTicks: 60 },
-};
-
-/**
  * What each resource building can be set to produce in the Production view.
- * Single-option buildings (farm -> lentils) still need to be activated;
- * multi-option buildings (mine -> coal/stone) let the player choose.
- * Buildings with no entry here have no known production yet and stay
- * Infrastructure-only until the industry phase.
+ * Food buildings offer recipes with different yields (all into "food");
+ * the mine chooses between coal and stone.
+ *
+ * Production only runs when the player picks an option for the building in
+ * the Production view. No selection = inactive (produces nothing).
  */
-export const BUILDING_PRODUCTION_OPTIONS: Record<string, BuildingYield[]> = {
-  farm: [{ resource: "lentils", amount: 4, everyTicks: 60 }],
-  pasture: [{ resource: "meat", amount: 2, everyTicks: 60 }],
-  fishery: [{ resource: "meat", amount: 3, everyTicks: 60 }],
-  huntingCamp: [{ resource: "meat", amount: 2, everyTicks: 60 }],
-  mine: [
-    { resource: "coal", amount: 1, everyTicks: 240 },
-    { resource: "stone", amount: 1, everyTicks: 60 },
+export const BUILDING_PRODUCTION_OPTIONS: Record<string, ProductionOption[]> = {
+  farm: [
+    { id: "lentils", label: "Lentils", resource: FOOD_RESOURCE, amount: 2, everyTicks: 60 },
+    { id: "rice", label: "Rice", resource: FOOD_RESOURCE, amount: 3, everyTicks: 60 },
+    { id: "cattle", label: "Cattle", resource: FOOD_RESOURCE, amount: 4, everyTicks: 60 },
   ],
-  quarry: [{ resource: "stone", amount: 2, everyTicks: 60 }],
-  lumberCamp: [{ resource: "wood", amount: 2, everyTicks: 60 }],
+  pasture: [
+    { id: "cattle", label: "Cattle", resource: FOOD_RESOURCE, amount: 4, everyTicks: 60 },
+  ],
+  fishery: [
+    { id: "fish", label: "Fish", resource: FOOD_RESOURCE, amount: 3, everyTicks: 60 },
+  ],
+  huntingCamp: [
+    { id: "game", label: "Game", resource: FOOD_RESOURCE, amount: 2, everyTicks: 60 },
+  ],
+  mine: [
+    { id: "coal", label: "Coal", resource: "coal", amount: 1, everyTicks: 240 },
+    { id: "stone", label: "Stone", resource: "stone", amount: 1, everyTicks: 60 },
+  ],
+  quarry: [{ id: "stone", label: "Stone", resource: "stone", amount: 2, everyTicks: 60 }],
+  lumberCamp: [{ id: "wood", label: "Wood", resource: "wood", amount: 2, everyTicks: 60 }],
 };
 
 /** Production options for a building key, or empty when it produces nothing. */
-export function productionOptionsFor(key: string): BuildingYield[] {
+export function productionOptionsFor(key: string): ProductionOption[] {
   return BUILDING_PRODUCTION_OPTIONS[key] ?? [];
 }
 
-/** Selected resource for a building key, or null when inactive/unset. */
+/** Selected production option id for a building key, or null when inactive/unset. */
 export function productionAssignment(civ: Civilization, key: string): string | null {
   return civ.production.assignments[key] ?? null;
 }
@@ -140,6 +126,9 @@ export function clampAllocation(allocation: number[], population: number): numbe
   return next;
 }
 
+/** Ticks in one real-time hour (1 tick = 1 minute). */
+export const TICKS_PER_HOUR = 3600 / TICK_SECONDS;
+
 /** Research points earned per tick from the current allocation. */
 export function researchPerTick(civ: Civilization): number {
   const researchers = civ.overview.allocation[allocationIndex("Research")] ?? 0;
@@ -156,11 +145,91 @@ export function infraLaborPerTick(civ: Civilization): number {
   return civ.overview.allocation[allocationIndex("Infrastructure")] ?? 0;
 }
 
-/** Food value needed at the next meal: allocated eat full, free eat half (floored). */
+/** Food needed at the next meal: allocated eat full, free eat half (floored). */
 export function mealNeed(civ: Civilization): number {
   const allocated = civ.overview.allocation.reduce((s, v) => s + v, 0);
   const free = Math.max(0, civ.overview.population - allocated);
   return allocated * FOOD_PER_CITIZEN + Math.floor(free * FREE_FOOD_RATE);
+}
+
+/**
+ * Resource gains per tick from owned buildings that are currently assigned an
+ * option in Production. Mirrors the production step of advanceTick exactly.
+ */
+export function productionPerTick(civ: Civilization): Record<string, number> {
+  const gains: Record<string, number> = {};
+  const labor = laborPerTick(civ);
+  if (labor <= 0) return gains;
+  const assignments = civ.production.assignments ?? {};
+  for (const group of Object.values(civ.infrastructure)) {
+    for (const [key, building] of Object.entries(group)) {
+      if (building.count <= 0) continue;
+      const selected = assignments[key];
+      if (!selected) continue;
+      const options = BUILDING_PRODUCTION_OPTIONS[key];
+      if (!options) continue;
+      const option = options.find((o) => o.id === selected);
+      if (!option) continue;
+      const gain = (labor * building.count * option.amount) / option.everyTicks;
+      gains[option.resource] = (gains[option.resource] ?? 0) + gain;
+    }
+  }
+  return gains;
+}
+
+/** Clamp a requested meal interval to the policy slider range (whole hours). */
+export function clampMealIntervalHours(hours: number): number {
+  return Math.max(
+    MIN_MEAL_INTERVAL_HOURS,
+    Math.min(MAX_MEAL_INTERVAL_HOURS, Math.round(hours))
+  );
+}
+
+/** Ticks between meals under the current Politics policy. */
+export function mealIntervalTicks(civ: Civilization): number {
+  return clampMealIntervalHours(civ.politics.mealIntervalHours) * TICKS_PER_HOUR;
+}
+
+/**
+ * Public mood current policies push citizens toward. 8h (the default) is
+ * neutral; shorter intervals make people happier, longer intervals angrier.
+ */
+export function happinessTarget(civ: Civilization): number {
+  const hours = clampMealIntervalHours(civ.politics.mealIntervalHours);
+  const raw = HAPPINESS_BASELINE + (DEFAULT_MEAL_INTERVAL_HOURS - hours) * HAPPINESS_PER_MEAL_HOUR;
+  return Math.max(0, Math.min(100, raw));
+}
+
+/** Food eaten per tick, averaged across the current meal cycle. */
+export function foodConsumptionPerTick(civ: Civilization): number {
+  return mealNeed(civ) / mealIntervalTicks(civ);
+}
+
+export interface ResourceRate {
+  /** Units produced per hour by active buildings. */
+  production: number;
+  /** Units consumed per hour (food only, for now). */
+  consumption: number;
+  /** production - consumption, per hour. */
+  net: number;
+}
+
+/**
+ * Net change per hour for every resource the simulation touches, including
+ * food demand even when the stockpile is empty (so deficits stay visible).
+ * Rates are derived from the same helpers advanceTick uses, so the Resources
+ * view can show what the stockpile is about to do without duplicating math.
+ */
+export function resourceRatesPerHour(civ: Civilization): Record<string, ResourceRate> {
+  const production = productionPerTick(civ);
+  const consumption: Record<string, number> = { [FOOD_RESOURCE]: foodConsumptionPerTick(civ) };
+  const rates: Record<string, ResourceRate> = {};
+  for (const key of new Set([...Object.keys(production), ...Object.keys(consumption)])) {
+    const produced = (production[key] ?? 0) * TICKS_PER_HOUR;
+    const consumed = (consumption[key] ?? 0) * TICKS_PER_HOUR;
+    rates[key] = { production: produced, consumption: consumed, net: produced - consumed };
+  }
+  return rates;
 }
 
 /** Estimated ticks to finish the active construction, or null if stalled/none. */
@@ -206,52 +275,53 @@ export function researchProgress(civ: Civilization, id: string): number {
 /** Advance the civilization by exactly one tick (pure, immutable). */
 export function advanceTick(prev: Civilization): Civilization {
   const tick = prev.tick + 1;
-  const labor = prev.overview.allocation[allocationIndex("Production")] ?? 0;
   const researchers = prev.overview.allocation[allocationIndex("Research")] ?? 0;
 
   // --- Research (progress saved per tech, survives cancel/switch) ---
   let researchActiveId = prev.research.activeId;
   let researchCompleted = prev.research.completed;
   let researchProgressMap = prev.research.progress;
+  let researchQueue = [...(prev.research.queue ?? [])];
   if (researchActiveId && researchers > 0) {
     const tech = TECHNOLOGIES[researchActiveId];
     if (tech && !researchCompleted.includes(researchActiveId)) {
       const done = (researchProgressMap[researchActiveId] ?? 0) + researchers * RESEARCH_POINTS_PER_RESEARCHER_PER_TICK;
       if (done >= tech.cost) {
-        researchCompleted = [...researchCompleted, researchActiveId];
+        const completedId = researchActiveId;
+        researchCompleted = [...researchCompleted, completedId];
         researchActiveId = null;
-        const { [researchActiveId]: _discard, ...rest } = researchProgressMap;
+        const { [completedId]: _discard, ...rest } = researchProgressMap;
         researchProgressMap = rest;
       } else {
         researchProgressMap = { ...researchProgressMap, [researchActiveId]: done };
       }
     }
   }
+  // Start the next queued tech as soon as the previous one finishes. Invalid
+  // or already-completed entries are skipped so a stale queue can't stall.
+  if (!researchActiveId && researchQueue.length > 0) {
+    const pending = [...researchQueue];
+    while (pending.length > 0) {
+      const next = pending.shift() as string;
+      if (TECHNOLOGIES[next] && !researchCompleted.includes(next)) {
+        researchActiveId = next;
+        break;
+      }
+    }
+    researchQueue = pending;
+  }
 
   // --- Resource production: each labor point feeds every ACTIVE owned building ---
   // A building only produces when the player picked an output for it in
   // Production (production.assignments[key]). Unset/null = inactive.
   const stockpile: Record<string, number> = { ...prev.resources.stockpile };
-  if (labor > 0) {
-    const assignments = prev.production.assignments ?? {};
-    for (const group of Object.values(prev.infrastructure)) {
-      for (const [key, building] of Object.entries(group)) {
-        if (building.count <= 0) continue;
-        const selected = assignments[key];
-        if (!selected) continue;
-        const options = BUILDING_PRODUCTION_OPTIONS[key];
-        if (!options) continue;
-        const yield_ = options.find((o) => o.resource === selected);
-        if (!yield_) continue;
-        const gain = (labor * building.count * yield_.amount) / yield_.everyTicks;
-        stockpile[yield_.resource] = (stockpile[yield_.resource] ?? 0) + gain;
-      }
-    }
+  for (const [resource, gain] of Object.entries(productionPerTick(prev))) {
+    stockpile[resource] = (stockpile[resource] ?? 0) + gain;
   }
 
   // --- Construction: infrastructure labor builds the active building ---
   let infrastructure = prev.infrastructure;
-  let construction = prev.construction;
+  let construction = { ...prev.construction, queue: [...(prev.construction.queue ?? [])] };
   const infraLabor = prev.overview.allocation[allocationIndex("Infrastructure")] ?? 0;
   if (construction.activeKey && infraLabor > 0) {
     const cost = buildingNextCost(
@@ -274,43 +344,35 @@ export function advanceTick(prev: Civilization): Civilization {
             },
           };
         }
-        construction = { activeKey: null, progress: 0 };
+        construction = { activeKey: null, progress: 0, queue: construction.queue };
       } else {
         construction = { ...construction, progress };
       }
     }
   }
+  // Start the next queued building as soon as the current one finishes.
+  if (!construction.activeKey && construction.queue.length > 0) {
+    const [next, ...rest] = construction.queue;
+    construction = { activeKey: next, progress: 0, queue: rest };
+  }
 
-  // --- Food consumption every 480 ticks (meat=2, lentils/food=1) ---
-  // Allocated citizens eat full rate, free citizens eat half.
+  // --- Food consumption at the interval set by the Politics meal policy ---
+  // Allocated citizens eat full rate, free citizens eat half. All food types
+  // share one stockpile, so a meal simply drains FOOD_RESOURCE.
+  const mealTicks = mealIntervalTicks(prev);
   let population = prev.overview.population;
   let allocation = prev.overview.allocation;
   let starvedThisTick = false;
-  if (tick % FOOD_CONSUMPTION_INTERVAL_TICKS === 0) {
-    const allocated = allocation.reduce((s, v) => s + v, 0);
-    const free = Math.max(0, population - allocated);
-    const need = allocated * FOOD_PER_CITIZEN + Math.floor(free * FREE_FOOD_RATE);
-    const haveValue = foodValue(stockpile);
-    if (haveValue >= need) {
-      let remaining = need;
-      for (const key of EAT_ORDER) {
-        if (remaining <= 0) break;
-        const value = FOOD_VALUES[key] ?? 0;
-        if (value <= 0) continue;
-        const availableValue = (stockpile[key] ?? 0) * value;
-        if (availableValue >= remaining) {
-          stockpile[key] = (stockpile[key] ?? 0) - remaining / value;
-          remaining = 0;
-        } else {
-          remaining -= availableValue;
-          stockpile[key] = 0;
-        }
-      }
+  if (tick % mealTicks === 0) {
+    const need = mealNeed(prev);
+    const have = stockpile[FOOD_RESOURCE] ?? 0;
+    if (have >= need) {
+      stockpile[FOOD_RESOURCE] = have - need;
     } else {
-      // Unfed food value = deaths (each death counts as 1 not-eaten meal).
-      const deaths = Math.min(population, Math.ceil(need - haveValue));
+      // Unfed meals become deaths (one death per missing meal).
+      const deaths = Math.min(population, Math.ceil(need - have));
       population = Math.max(0, population - deaths);
-      for (const key of EAT_ORDER) stockpile[key] = 0;
+      stockpile[FOOD_RESOURCE] = 0;
       starvedThisTick = true;
       allocation = clampAllocation(allocation, population);
     }
@@ -319,19 +381,29 @@ export function advanceTick(prev: Civilization): Civilization {
   // --- Growth every 60 ticks when food is in surplus (never while starving) ---
   if (!starvedThisTick && tick % GROWTH_INTERVAL_TICKS === 0) {
     const limit = populationLimit({ ...prev, overview: { ...prev.overview, population } } as Civilization);
-    if (population < limit && foodValue(stockpile) > 0) {
+    if (population < limit && (stockpile[FOOD_RESOURCE] ?? 0) > 0) {
       population += 1;
       // New citizen starts unemployed: allocation unchanged, free grows.
     }
   }
+
+  // --- Public mood drifts 1 point/tick toward what the meal policy implies ---
+  const moodTarget = happinessTarget(prev);
+  const happinessStep = Math.min(1, Math.abs(moodTarget - prev.politics.happiness));
+  const politics = {
+    ...prev.politics,
+    happiness:
+      prev.politics.happiness + Math.sign(moodTarget - prev.politics.happiness) * happinessStep,
+  };
 
   return {
     ...prev,
     tick,
     overview: { population, allocation },
     resources: { stockpile },
-    research: { activeId: researchActiveId, completed: researchCompleted, progress: researchProgressMap },
+    research: { activeId: researchActiveId, queue: researchQueue, completed: researchCompleted, progress: researchProgressMap },
     infrastructure,
     construction,
+    politics,
   };
 }

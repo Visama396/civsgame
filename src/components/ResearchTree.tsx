@@ -1,6 +1,7 @@
-import { ERAS, TECHNOLOGIES, availableTechs } from "../data/technologies";
+import { ERAS, TECHNOLOGIES, availableTechs, eraName, techDescription, techName } from "../data/technologies";
 import { formatTicks, ticksToCompleteTech } from "../data/simulation";
 import type { Civilization } from "../data/civilization";
+import { UI, type Language } from "../i18n";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Tooltip,
@@ -70,11 +71,12 @@ interface NodePos {
   y: number;
 }
 
-type Status = "completed" | "active" | "available" | "locked";
+type Status = "completed" | "active" | "queued" | "available" | "locked";
 
 const NODE_STYLE: Record<Status, string> = {
   completed: "border-green-400/70 bg-green-400/10 text-green-300",
   active: "border-amber-400 bg-amber-400/10 text-amber-200",
+  queued: "border-cyan-400/70 bg-cyan-400/10 text-cyan-200",
   available: "border-white/50 bg-black text-white/80 hover:bg-white/10 cursor-pointer",
   locked: "border-white/10 bg-black text-white/30 cursor-not-allowed",
 };
@@ -203,11 +205,14 @@ export default function ResearchTree({
   game,
   tickTimeCounter,
   onSelect,
+  lang,
 }: {
   game: Civilization;
   tickTimeCounter: number;
   onSelect: (id: string) => void;
+  lang: Language;
 }) {
+  const t = UI[lang];
   const { pos, eraSpans, width, height } = layout();
   const available = new Set(availableTechs(game.research.completed).map((t) => t.id));
   const completed = new Set(game.research.completed);
@@ -239,16 +244,17 @@ export default function ResearchTree({
   function status(id: string): Status {
     if (completed.has(id)) return "completed";
     if (game.research.activeId === id) return "active";
+    if ((game.research.queue ?? []).includes(id)) return "queued";
     if (available.has(id)) return "available";
     return "locked";
   }
 
-  /** Time to finish a tech, or "-- min" when no researchers are assigned. */
+  /** Time to finish a tech, or a placeholder when no researchers are assigned. */
   function timeLabel(id: string): string {
     const eta = ticksToCompleteTech(game, id);
-    if (eta === null) return "-- min";
-    if (eta <= 1) return `${tickTimeCounter}s`;
-    return formatTicks(eta);
+    if (eta === null) return t.noResearchers;
+    if (eta <= 1) return t.seconds(tickTimeCounter);
+    return formatTicks(eta, lang);
   }
 
   function tooltipContent(id: string): ReactNode {
@@ -256,20 +262,25 @@ export default function ResearchTree({
     return (
       <div>
         <p className="font-semibold text-amber-200" style={{ fontSize: 12 }}>
-          {tech.name}
+          {techName(id, lang)}
         </p>
         <p
           className="uppercase text-white/40"
           style={{ fontSize: 10, letterSpacing: "0.08em" }}
         >
-          {tech.era}
+          {eraName(tech.era, lang)}
         </p>
         <p className="mt-1 text-white/80" style={{ fontSize: 11 }}>
-          {tech.description}
+          {techDescription(id, lang)}
         </p>
+        {(game.research.queue ?? []).includes(id) && (
+          <p className="mt-1 text-cyan-200" style={{ fontSize: 11 }}>
+            {t.queuedLabel}
+          </p>
+        )}
         {tech.requiresAll.length > 0 && (
           <div className="mt-1" style={{ fontSize: 11 }}>
-            <p className="text-white/40">Requires:</p>
+            <p className="text-white/40">{t.requiresLabel}</p>
             {tech.requiresAll.map((r) => {
               const met = completed.has(r);
               return (
@@ -277,14 +288,14 @@ export default function ResearchTree({
                   key={r}
                   className={met ? "text-green-300/80" : "text-red-400/90"}
                 >
-                  {met ? "✓" : "•"} {TECHNOLOGIES[r]?.name ?? r}
+                  {met ? "✓" : "•"} {techName(r, lang)}
                 </p>
               );
             })}
           </div>
         )}
         <p className="mt-1 text-white/50" style={{ fontSize: 11 }}>
-          Cost {tech.cost} pts · {timeLabel(id)}
+          {t.costLabel(tech.cost, timeLabel(id))}
         </p>
       </div>
     );
@@ -337,40 +348,40 @@ export default function ResearchTree({
                 letterSpacing: "0.08em",
               }}
             >
-              {era}
+              {eraName(era, lang)}
             </div>
           ))}
-          {Object.values(TECHNOLOGIES).map((t) => {
-            const p = pos[t.id];
-            const st = status(t.id);
-            const clickable = st === "available" || st === "active";
+          {Object.values(TECHNOLOGIES).map((tech) => {
+            const p = pos[tech.id];
+            const st = status(tech.id);
+            const clickable = st === "available" || st === "active" || st === "queued";
             return (
-              <Tooltip key={t.id}>
+              <Tooltip key={tech.id}>
                 <TooltipTrigger asChild>
                   <button
                     type="button"
                     aria-disabled={!clickable}
                     onClick={() => {
-                      if (clickable) onSelect(t.id);
+                      if (clickable) onSelect(tech.id);
                     }}
-                    onMouseEnter={() => setHoverId(t.id)}
+                    onMouseEnter={() => setHoverId(tech.id)}
                     onMouseLeave={() => setHoverId(null)}
-                    onFocus={() => setHoverId(t.id)}
+                    onFocus={() => setHoverId(tech.id)}
                     onBlur={() => setHoverId(null)}
                     className={`absolute border px-1.5 py-1 text-left ${NODE_STYLE[st]}`}
                     style={{ left: p.x, top: p.y, width: NODE_W, height: NODE_H }}
                   >
                     <span className="block truncate" style={{ fontSize: 12 }}>
-                      {t.name}
-                      {st === "active" ? " [x]" : ""}
+                      {techName(tech.id, lang)}
+                      {st === "active" ? " [x]" : st === "queued" ? " [Q]" : ""}
                     </span>
                     {st === "completed" ? (
                       <span className="block text-white/50" style={{ fontSize: 11 }}>
-                        done
+                        {t.doneLabel}
                       </span>
                     ) : (
                       <>
-                        {t.requiresAll.map((r) => {
+                        {tech.requiresAll.map((r) => {
                           const met = completed.has(r);
                           return (
                             <span
@@ -378,18 +389,18 @@ export default function ResearchTree({
                               className={`block truncate ${met ? "text-green-400" : "text-red-400"}`}
                               style={{ fontSize: 11 }}
                             >
-                              • {TECHNOLOGIES[r]?.name ?? r}
+                              • {techName(r, lang)}
                             </span>
                           );
                         })}
                         <span className="block text-white/50" style={{ fontSize: 11 }}>
-                          {timeLabel(t.id)}
+                          {timeLabel(tech.id)}
                         </span>
                       </>
                     )}
                   </button>
                 </TooltipTrigger>
-                <TooltipContent>{tooltipContent(t.id)}</TooltipContent>
+                <TooltipContent>{tooltipContent(tech.id)}</TooltipContent>
               </Tooltip>
             );
           })}

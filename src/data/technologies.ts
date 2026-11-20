@@ -6,6 +6,8 @@
 // Parallel slots unlock as the empire advances (later eras / governments).
 // Prerequisites are AND: every id in requiresAll must be completed first.
 
+import { ERA_TEXT, TECH_TEXT, type Language } from "../i18n";
+
 export const ERAS = [
   "Ancient Age",
   "Medieval Times",
@@ -908,4 +910,25 @@ export function availableTechs(researched: string[]): Technology[] {
 /** Starting options: no prerequisites. */
 export function startingTechs(): Technology[] {
   return Object.values(TECHNOLOGIES).filter((t) => t.requiresAll.length === 0);
+}
+
+/** Localized tech name, falling back to English. */
+export function techName(id: string, lang: Language = "en"): string {
+  const tech = TECHNOLOGIES[id];
+  if (!tech) return id;
+  if (lang === "en") return tech.name;
+  return TECH_TEXT[lang][id]?.[0] ?? tech.name;
+}
+
+/** Localized tech description, falling back to English. */
+export function techDescription(id: string, lang: Language = "en"): string {
+  const tech = TECHNOLOGIES[id];
+  if (!tech) return "";
+  if (lang === "en") return tech.description;
+  return TECH_TEXT[lang][id]?.[1] ?? tech.description;
+}
+
+/** Localized era name. Era keys stay English in game state. */
+export function eraName(era: string, lang: Language = "en"): string {
+  return ERA_TEXT[lang][era] ?? era;
 }
